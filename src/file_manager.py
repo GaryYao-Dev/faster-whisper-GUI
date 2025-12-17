@@ -2,6 +2,7 @@
 
 import shutil
 import logging
+import zipfile
 from pathlib import Path
 from typing import Optional, Tuple, List
 import datetime
@@ -384,12 +385,28 @@ class FileManager:
             if archive_path is None:
                 archive_path = f"{directory}.zip"
             
-            # Remove .zip extension if present (shutil.make_archive adds it)
-            archive_base = str(Path(archive_path).with_suffix(''))
+            # Ensure archive path ends with .zip
+            if not archive_path.lower().endswith('.zip'):
+                archive_path += '.zip'
             
-            shutil.make_archive(archive_base, 'zip', dir_path)
+            # Use zipfile directly for better control and performance
+            # shutil.make_archive can be slow and sometimes includes full paths
+            with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for file in dir_path.rglob('*'):
+                    if file.is_file() and str(file) != archive_path:
+                        # Calculate relative path for the archive
+                        rel_path = file.relative_to(dir_path)
+                        
+                        # Determine compression method based on file type
+                        # Store media files (already compressed) to save time
+                        # Compress text/json files
+                        compression = zipfile.ZIP_DEFLATED
+                        if file.suffix.lower() in SUPPORTED_FORMATS:
+                            compression = zipfile.ZIP_STORED
+                            
+                        zipf.write(file, rel_path, compress_type=compression)
             
-            final_path = f"{archive_base}.zip"
+            final_path = archive_path
             size_mb = Path(final_path).stat().st_size / (1024 * 1024)
             message = f"Archive created: {Path(final_path).name} ({size_mb:.2f} MB)"
             logger.info(message)

@@ -55,11 +55,20 @@ class EnvironmentChecker:
     
     def check_ffmpeg(self) -> Tuple[bool, str]:
         """
-        Check if FFmpeg is installed and accessible.
+        Check if FFmpeg Python package and binary are available.
         
         Returns:
             Tuple[bool, str]: (is_available, version_or_error_message)
         """
+        # Check Python package
+        try:
+            import ffmpeg
+        except ImportError:
+            message = "ffmpeg-python package not installed"
+            logger.error(message)
+            return False, message
+        
+        # Check binary
         try:
             result = subprocess.run(
                 ["ffmpeg", "-version"],
@@ -68,19 +77,18 @@ class EnvironmentChecker:
                 timeout=5
             )
             if result.returncode == 0:
-                # Extract version from first line
                 version_line = result.stdout.split('\n')[0]
                 self.ffmpeg_version = version_line.split()[2] if len(version_line.split()) > 2 else "unknown"
                 self.ffmpeg_available = True
-                message = f"FFmpeg {self.ffmpeg_version}"
-                logger.info(f"FFmpeg available: {message}")
+                message = f"FFmpeg {self.ffmpeg_version} + Python package"
+                logger.info(message)
                 return True, message
             else:
-                message = "FFmpeg found but returned error"
+                message = "FFmpeg binary found but returned error"
                 logger.error(message)
                 return False, message
         except FileNotFoundError:
-            message = "FFmpeg not found in PATH"
+            message = "FFmpeg binary not found in PATH (ffmpeg-python package is installed but needs FFmpeg binary)"
             logger.error(message)
             return False, message
         except subprocess.TimeoutExpired:
@@ -167,9 +175,11 @@ class EnvironmentChecker:
         ffmpeg_ok, ffmpeg_msg = self.check_ffmpeg()
         if require_ffmpeg and not ffmpeg_ok:
             issues.append(
-                f"❌ FFmpeg is required but not found.\n"
-                f"   Please install FFmpeg and add it to your PATH.\n"
-                f"   Download: https://ffmpeg.org/download.html"
+                f"❌ FFmpeg is required: {ffmpeg_msg}\n"
+                f"   Install FFmpeg binary:\n"
+                f"   - Windows (choco): choco install ffmpeg\n"
+                f"   - Windows (winget): winget install Gyan.FFmpeg\n"
+                f"   - Manual: https://ffmpeg.org/download.html"
             )
         
         # Check CUDA (recommended, but not strictly required if CPU mode is used)
@@ -214,8 +224,8 @@ class EnvironmentChecker:
         print("SYSTEM ENVIRONMENT REPORT")
         print("="*60)
         print(f"Python Version:     {info['python_version']}")
-        print(f"CUDA Available:     {'✅' if info['cuda_available'] else '❌'} {info['cuda_info']}")
-        print(f"FFmpeg Available:   {'✅' if info['ffmpeg_available'] else '❌'} {info['ffmpeg_info']}")
+        print(f"CUDA Available:     {'YES' if info['cuda_available'] else 'NO'} {info['cuda_info']}")
+        print(f"FFmpeg Available:   {'YES' if info['ffmpeg_available'] else 'NO'} {info['ffmpeg_info']}")
         print(f"Recommended Device: {info['recommended_device'].upper()}")
         print("\nDependencies:")
         for pkg, installed in info['dependencies'].items():

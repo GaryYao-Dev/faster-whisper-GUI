@@ -221,29 +221,71 @@ class WhisperGUI:
             logger.error(f"Error moving files back: {e}")
             return f"Error: {str(e)}"
     
-    def download_output_folder(self, output_folder_path: str) -> Tuple[Optional[str], str]:
+    def download_output_folder(self, output_folder_path: str) -> Tuple[str, Optional[str]]:
         """
-        Create a ZIP archive of the output folder for download.
+        Create a ZIP archive of the output folder for download using multiprocessing.
         
         Args:
             output_folder_path: Path to output subfolder
             
         Returns:
-            Tuple[Optional[str], str]: (archive_path, status_message)
+            Tuple[str, Optional[str]]: (status_message, archive_path)
         """
         if not output_folder_path or not Path(output_folder_path).exists():
-            return None, "No output folder selected or folder doesn't exist"
+            return "No output folder selected or folder doesn't exist", None
         
         try:
-            success, archive_path, msg = self.file_manager.create_archive(output_folder_path)
-            if success:
-                return archive_path, msg
-            else:
-                return None, msg
+            logger.info(f"Creating archive for: {output_folder_path}")
+            
+            # Create queue for communication
+            result_queue = Queue()
+            
+            # Start worker process
+            process = Process(
+                target=WhisperGUI.archive_worker,
+                args=(output_folder_path, result_queue)
+            )
+            
+            process.start()
+            logger.info(f"Archive worker process started (PID: {process.pid})")
+            
+            # Wait for result with timeout
+            max_wait = 300  # 5 minutes timeout
+            start_time = time.time()
+            
+            while process.is_alive() or not result_queue.empty():
+                if not result_queue.empty():
+                    status, archive_path, message = result_queue.get()
+                    process.join(timeout=5)
+                    
+                    if status == "error":
+                        logger.error(f"Archive creation failed: {message}")
+                        return f"Error: {message}", None
+                    elif status == "success":
+                        abs_path = str(Path(archive_path).resolve())
+                        if Path(abs_path).exists():
+                            logger.info(f"Archive ready at: {abs_path}")
+                            return f"{message}. Click the file below to download.", abs_path
+                        else:
+                            return "Error: Archive file was created but cannot be found.", None
+                
+                # Check timeout
+                if time.time() - start_time > max_wait:
+                    logger.error("Archive creation timeout")
+                    process.terminate()
+                    process.join(timeout=5)
+                    if process.is_alive():
+                        process.kill()
+                    return "Error: Archive creation timeout (>5 minutes)", None
+                
+                time.sleep(0.1)
+            
+            process.join(timeout=5)
+            return "Error: No result from archive worker", None
                 
         except Exception as e:
             logger.error(f"Error creating archive: {e}")
-            return None, f"Error: {str(e)}"
+            return f"Error: {str(e)}", None
     
     def load_output_preview(self, output_folder_path: str) -> Tuple[str, str, str, str]:
         """
@@ -298,6 +340,49 @@ class WhisperGUI:
         except Exception as e:
             logger.error(f"Error listing output folders: {e}")
             return []
+    
+    @staticmethod
+    def archive_worker(
+        directory: str,
+        result_queue: Queue
+    ):
+        """
+        Worker process for creating ZIP archives (runs in separate process to avoid blocking Gradio).
+        """
+        try:
+            import zipfile
+            from pathlib import Path
+            from .config import SUPPORTED_FORMATS
+            
+            dir_path = Path(directory)
+            
+            if not dir_path.exists():
+                result_queue.put(("error", "", f"Directory not found: {directory}"))
+                return
+            
+            archive_path = f"{directory}.zip"
+            
+            # Use zipfile with optimized settings
+            with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=1) as zipf:
+                for file in dir_path.rglob('*'):
+                    if file.is_file():
+                        rel_path = file.relative_to(dir_path)
+                        
+                        # Store media files, compress text files
+                        compression = zipfile.ZIP_DEFLATED
+                        if file.suffix.lower() in SUPPORTED_FORMATS:
+                            compression = zipfile.ZIP_STORED
+                            
+                        zipf.write(file, rel_path, compress_type=compression)
+            
+            size_mb = Path(archive_path).stat().st_size / (1024 * 1024)
+            message = f"Archive created: {Path(archive_path).name} ({size_mb:.2f} MB)"
+            
+            result_queue.put(("success", archive_path, message))
+            
+        except Exception as e:
+            logger.error(f"[Archive Worker] Error: {e}", exc_info=True)
+            result_queue.put(("error", "", f"Worker error: {str(e)}"))
     
     @staticmethod
     def transcription_worker(
@@ -680,9 +765,6 @@ class WhisperGUI:
                     )
                     
                     transcribe_btn = gr.Button("🚀 Start Transcription", variant="primary", size="lg")
-                
-                # Right column: Logs & Output
-                with gr.Column(scale=1):
                     gr.Markdown("## 📊 Processing Log")
                     log_output = gr.Textbox(
                         label="Status & Progress",
@@ -691,8 +773,18 @@ class WhisperGUI:
                         interactive=False,
                         autoscroll=True
                     )
+                # Right column: Logs & Output
+                with gr.Column(scale=1):
+
                     
                     gr.Markdown("## 📄 Output Preview")
+                    output_folder_selector = gr.Dropdown(
+                        label="Select Output Folder to Preview",
+                        choices=[],
+                        interactive=True
+                    )
+                    refresh_preview_btn = gr.Button("🔄 Refresh Output Folders", size="sm")
+                    
                     with gr.Tabs():
                         with gr.Tab("TXT"):
                             txt_output = gr.Textbox(
@@ -727,12 +819,6 @@ class WhisperGUI:
                             )
                     
                     gr.Markdown("## 📁 Output Management")
-                    output_folder_selector = gr.Dropdown(
-                        label="Select Output Folder to Preview",
-                        choices=[],
-                        interactive=True
-                    )
-                    refresh_preview_btn = gr.Button("🔄 Refresh Output Folders", size="sm")
                     
                     output_folder_mgmt = gr.Dropdown(
                         label="Select Output Folder to Manage",
@@ -745,7 +831,7 @@ class WhisperGUI:
                         download_btn = gr.Button("⬇️ Download Folder (ZIP)", variant="primary")
                     
                     output_mgmt_status = gr.Textbox(label="Status", interactive=False)
-                    download_file = gr.File(label="Download Archive", visible=False)
+                    download_file = gr.File(label="Download Archive")
             
             # Event handlers
             file_upload.change(
@@ -808,11 +894,7 @@ class WhisperGUI:
             download_btn.click(
                 fn=self.download_output_folder,
                 inputs=[output_folder_mgmt],
-                outputs=[download_file, output_mgmt_status]
-            ).then(
-                fn=lambda x: gr.File(visible=True) if x else gr.File(visible=False),
-                inputs=[download_file],
-                outputs=[download_file]
+                outputs=[output_mgmt_status, download_file]
             )
             
             # Initialize radio and dropdowns on load
