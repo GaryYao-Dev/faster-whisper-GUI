@@ -184,26 +184,30 @@ class WhisperGUI:
         html += "</div>"
         return html
     
-    def move_files_back(self, output_folder_path: str) -> str:
+    def move_files_back(self, output_folder_name: str) -> str:
         """
         Move processed files back from output folder to input directory.
         
         Args:
-            output_folder_path: Path to output subfolder
+            output_folder_name: Name of output folder
             
         Returns:
             str: Status message
         """
-        if not output_folder_path or not Path(output_folder_path).exists():
-            return "No output folder selected or folder doesn't exist"
+        if not output_folder_name:
+            return "No output folder selected"
         
         try:
-            output_dir = Path(output_folder_path)
+            output_base = Path(self.file_manager.options.output_base_dir)
+            data_dir = output_base / output_folder_name / "data"
             input_dir = Path("input")  # Default input directory
             input_dir.mkdir(exist_ok=True)
             
+            if not data_dir.exists():
+                return "Data folder doesn't exist"
+            
             moved_files = []
-            for file in output_dir.iterdir():
+            for file in data_dir.iterdir():
                 if file.is_file() and file.suffix.lower() in SUPPORTED_FORMATS:
                     success, new_path, msg = self.file_manager.move_back_to_input(
                         str(file),
@@ -221,91 +225,63 @@ class WhisperGUI:
             logger.error(f"Error moving files back: {e}")
             return f"Error: {str(e)}"
     
-    def download_output_folder(self, output_folder_path: str) -> Tuple[str, Optional[str]]:
+    def download_output_folder(self, output_folder_name: str) -> Tuple[Optional[str], dict, dict]:
         """
-        Create a ZIP archive of the output folder for download using multiprocessing.
+        Return the ZIP archive path if it exists and visibility updates.
         
         Args:
-            output_folder_path: Path to output subfolder
+            output_folder_name: Name of output folder
             
         Returns:
-            Tuple[str, Optional[str]]: (status_message, archive_path)
+            Tuple[Optional[str], dict, dict]: (archive_path, download_file_visibility, move_btn_visibility)
         """
-        if not output_folder_path or not Path(output_folder_path).exists():
-            return "No output folder selected or folder doesn't exist", None
+        if not output_folder_name:
+            return None, gr.update(visible=False), gr.update(visible=False)
         
         try:
-            logger.info(f"Creating archive for: {output_folder_path}")
+            output_base = Path(self.file_manager.options.output_base_dir)
+            folder_path = output_base / output_folder_name
+            # ZIP is inside the folder now
+            archive_path = folder_path / f"{output_folder_name}.zip"
             
-            # Create queue for communication
-            result_queue = Queue()
+            if not folder_path.exists():
+                return None, gr.update(visible=False), gr.update(visible=False)
             
-            # Start worker process
-            process = Process(
-                target=WhisperGUI.archive_worker,
-                args=(output_folder_path, result_queue)
-            )
-            
-            process.start()
-            logger.info(f"Archive worker process started (PID: {process.pid})")
-            
-            # Wait for result with timeout
-            max_wait = 300  # 5 minutes timeout
-            start_time = time.time()
-            
-            while process.is_alive() or not result_queue.empty():
-                if not result_queue.empty():
-                    status, archive_path, message = result_queue.get()
-                    process.join(timeout=5)
-                    
-                    if status == "error":
-                        logger.error(f"Archive creation failed: {message}")
-                        return f"Error: {message}", None
-                    elif status == "success":
-                        abs_path = str(Path(archive_path).resolve())
-                        if Path(abs_path).exists():
-                            logger.info(f"Archive ready at: {abs_path}")
-                            return f"{message}. Click the file below to download.", abs_path
-                        else:
-                            return "Error: Archive file was created but cannot be found.", None
-                
-                # Check timeout
-                if time.time() - start_time > max_wait:
-                    logger.error("Archive creation timeout")
-                    process.terminate()
-                    process.join(timeout=5)
-                    if process.is_alive():
-                        process.kill()
-                    return "Error: Archive creation timeout (>5 minutes)", None
-                
-                time.sleep(0.1)
-            
-            process.join(timeout=5)
-            return "Error: No result from archive worker", None
+            if archive_path.exists():
+                abs_path = str(archive_path.resolve())
+                logger.info(f"Archive found at: {abs_path}")
+                return abs_path, gr.update(visible=True), gr.update(visible=True)
+            else:
+                return None, gr.update(visible=False), gr.update(visible=True)
                 
         except Exception as e:
-            logger.error(f"Error creating archive: {e}")
-            return f"Error: {str(e)}", None
+            logger.error(f"Error getting archive: {e}")
+            return None, gr.update(visible=False), gr.update(visible=False)
     
-    def load_output_preview(self, output_folder_path: str) -> Tuple[str, str, str, str]:
+    def load_output_preview(self, output_folder_name: str) -> Tuple[str, str, str, str]:
         """
         Load output files from selected folder for preview.
         
         Args:
-            output_folder_path: Path to output subfolder
+            output_folder_name: Name of output folder
             
         Returns:
             Tuple[str, str, str, str]: (txt_content, json_content, srt_content, vtt_content)
         """
-        if not output_folder_path or not Path(output_folder_path).exists():
+        if not output_folder_name:
             return "", "", "", ""
         
         try:
-            output_dir = Path(output_folder_path)
+            output_base = Path(self.file_manager.options.output_base_dir)
+            data_dir = output_base / output_folder_name / "data"
+            
+            if not data_dir.exists():
+                return "Data folder not found", "", "", ""
+            
             txt_content = json_content = srt_content = vtt_content = ""
             
-            # Find transcript files
-            for file in output_dir.iterdir():
+            # Find transcript files in data subfolder
+            for file in data_dir.iterdir():
                 if file.is_file():
                     if file.suffix == '.txt':
                         txt_content = file.read_text(encoding='utf-8')
@@ -327,27 +303,103 @@ class WhisperGUI:
         Get list of available output folders.
         
         Returns:
-            List[str]: List of output folder paths
+            List[str]: List of output folder names (without full path)
         """
         try:
             output_base = Path(self.file_manager.options.output_base_dir)
             if not output_base.exists():
                 return []
             
-            folders = [str(f) for f in output_base.iterdir() if f.is_dir()]
+            folders = [f.name for f in output_base.iterdir() if f.is_dir()]
             return sorted(folders, reverse=True)  # Most recent first
             
         except Exception as e:
             logger.error(f"Error listing output folders: {e}")
             return []
     
+    def get_output_folders_with_latest_selected(self) -> Tuple[List[str], Optional[str]]:
+        """
+        Get list of output folders and return the latest one as selected.
+        
+        Returns:
+            Tuple[List[str], Optional[str]]: (folders_list, latest_folder_name)
+        """
+        folders = self.get_output_folders()
+        latest = folders[0] if folders else None
+        return folders, latest
+    
+    def auto_create_zip(self, output_folder_name: str) -> Tuple[bool, str]:
+        """
+        Automatically create ZIP archive of output folder after transcription using multiprocessing.
+        
+        Args:
+            output_folder_name: Name of output folder
+            
+        Returns:
+            Tuple[bool, str]: (success, message)
+        """
+        try:
+            output_base = Path(self.file_manager.options.output_base_dir)
+            folder_path = output_base / output_folder_name
+            
+            if not folder_path.exists():
+                return False, "Output folder not found"
+            
+            # Create queue for communication
+            result_queue = Queue()
+            
+            # Start worker process
+            process = Process(
+                target=WhisperGUI.archive_worker,
+                args=(str(folder_path), result_queue, output_folder_name)
+            )
+            
+            process.start()
+            logger.info(f"Archive worker process started (PID: {process.pid})")
+            
+            # Wait for result with timeout
+            max_wait = 300  # 5 minutes timeout
+            start_time = time.time()
+            
+            while process.is_alive() or not result_queue.empty():
+                if not result_queue.empty():
+                    status, archive_path, message = result_queue.get()
+                    process.join(timeout=5)
+                    
+                    if status == "error":
+                        logger.error(f"Archive creation failed: {message}")
+                        return False, f"Archive creation failed: {message}"
+                    elif status == "success":
+                        logger.info(f"Archive created: {archive_path}")
+                        return True, message
+                
+                # Check timeout
+                if time.time() - start_time > max_wait:
+                    logger.error("Archive creation timeout")
+                    process.terminate()
+                    process.join(timeout=5)
+                    if process.is_alive():
+                        process.kill()
+                    return False, "Archive creation timeout (>5 minutes)"
+                
+                time.sleep(0.1)
+            
+            process.join(timeout=5)
+            return False, "No result from archive worker"
+            
+        except Exception as e:
+            logger.error(f"Error creating archive: {e}")
+            return False, f"Archive creation failed: {str(e)}"
+    
     @staticmethod
     def archive_worker(
         directory: str,
-        result_queue: Queue
+        result_queue: Queue,
+        folder_name: str = None
     ):
         """
         Worker process for creating ZIP archives (runs in separate process to avoid blocking Gradio).
+        Creates ZIP inside the folder as [name]/[name].zip
         """
         try:
             import zipfile
@@ -360,10 +412,14 @@ class WhisperGUI:
                 result_queue.put(("error", "", f"Directory not found: {directory}"))
                 return
             
-            archive_path = f"{directory}.zip"
+            # Create ZIP inside the folder with the folder name
+            if folder_name:
+                archive_path = dir_path / f"{folder_name}.zip"
+            else:
+                archive_path = dir_path.parent / f"{dir_path.name}.zip"
             
             # Use zipfile with optimized settings
-            with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=1) as zipf:
+            with zipfile.ZipFile(str(archive_path), 'w', zipfile.ZIP_DEFLATED, compresslevel=1) as zipf:
                 for file in dir_path.rglob('*'):
                     if file.is_file():
                         rel_path = file.relative_to(dir_path)
@@ -375,12 +431,14 @@ class WhisperGUI:
                             
                         zipf.write(file, rel_path, compress_type=compression)
             
-            size_mb = Path(archive_path).stat().st_size / (1024 * 1024)
-            message = f"Archive created: {Path(archive_path).name} ({size_mb:.2f} MB)"
+            size_mb = archive_path.stat().st_size / (1024 * 1024)
+            message = f"Archive created: {archive_path.name} ({size_mb:.2f} MB)"
             
-            result_queue.put(("success", archive_path, message))
+            result_queue.put(("success", str(archive_path), message))
             
         except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
             logger.error(f"[Archive Worker] Error: {e}", exc_info=True)
             result_queue.put(("error", "", f"Worker error: {str(e)}"))
     
@@ -469,45 +527,58 @@ class WhisperGUI:
         word_timestamps: bool,
         use_batched: bool,
         batch_size: int,
-        output_formats: List[str]
-    ) -> Tuple[str, str, str, str, str]:
+        output_formats: List[str],
+        progress=gr.Progress()
+    ):
         """
-        Main transcription function using multiprocessing.
+        Main transcription function using multiprocessing with progress updates.
+        
+        Yields progress updates to avoid blocking the UI.
         
         Returns:
-            Tuple[str, str, str, str, str]: (log_output, txt_output, json_output, srt_output, vtt_output)
+            Tuple[str, str, str, str, str]: (progress_status, txt_output, json_output, srt_output, vtt_output)
         """
-        logs = []
+        current_progress = 0.0
+        current_status = "Ready to start transcription..."
         
-        def log(message: str):
-            logs.append(message)
-            logger.info(message)
-            return "\n".join(logs)
+        def update_progress(value: float, desc: str = None):
+            """Update progress bar and status."""
+            nonlocal current_progress, current_status
+            current_progress = value
+            if desc:
+                current_status = desc
+                progress(value, desc=desc)
+            else:
+                progress(value)
+            return current_status
         
         try:
             # Validate device selection
+            update_progress(0.05, "Validating environment...")
             valid, msg = self.env_checker.validate_device_selection(device)
             if not valid:
-                log(f"❌ {msg}")
-                return log(""), "", "", "", ""
+                logger.error(f"Device validation failed: {msg}")
+                yield f"❌ {msg}", "", "", "", ""
+                return
             
-            log(f"✅ Environment check passed")
+            logger.info("Environment check passed")
             
             # Check if file selected
             if not self.current_file:
-                log("❌ No file selected from input folder")
-                log("Please select a file from the Input Folder section")
-                return log(""), "", "", "", ""
+                logger.error("No file selected")
+                yield "❌ No file selected from input folder", "", "", "", ""
+                return
             
             file_path = Path(self.current_file)
-            log(f"📁 Processing file: {file_path.name}")
+            logger.info(f"Processing file: {file_path.name}")
             
             # Handle video to audio conversion (in main process, following SRP)
             audio_path = str(file_path)
             temp_audio_path = None
             
             if self.media_converter.is_video_file(str(file_path)):
-                log(f"🎬 Video file detected, extracting audio...")
+                update_progress(0.1, "🎬 Extracting audio from video...")
+                logger.info("Video file detected, extracting audio")
                 
                 # Create temp audio file
                 temp_dir = Path(tempfile.gettempdir()) / "faster_whisper_gui"
@@ -517,21 +588,23 @@ class WhisperGUI:
                 success, audio_path, conv_msg = self.media_converter.convert_video_to_audio(
                     str(file_path),
                     temp_audio_path,
-                    audio_format="wav"
+                    audio_format="wav",
+                    progress_callback=lambda msg: logger.info(f"FFmpeg: {msg}")
                 )
                 
                 if not success:
-                    log(f"❌ {conv_msg}")
-                    return log(""), "", "", "", ""
-                
-                log(conv_msg)
+                    logger.error(f"Video conversion failed: {conv_msg}")
+                    yield f"❌ {conv_msg}", "", "", "", ""
+                    return
             
             # Create queues for communication
             result_queue = Queue()
             progress_queue = Queue()
             
             # Start worker process (only handles transcription)
-            log(f"Starting transcription worker process...")
+            update_progress(0.15, "⚙️ Starting transcription worker...")
+            logger.info("Starting transcription worker process")
+            
             process = Process(
                 target=WhisperGUI.transcription_worker,
                 args=(
@@ -559,33 +632,62 @@ class WhisperGUI:
             start_time = time.time()
             segments = None
             metadata = None
+            last_yield_time = time.time()
             
             while process.is_alive() or not result_queue.empty() or not progress_queue.empty():
                 # Check for progress messages
+                has_new_messages = False
                 while not progress_queue.empty():
                     msg_type, msg = progress_queue.get()
                     if msg_type == "log":
-                        log(msg)
+                        # Worker process log messages - only update progress status, not detailed log
+                        has_new_messages = True
+                        if "Loading model" in msg:
+                            update_progress(0.2, "Loading model...")
+                        elif "Transcribing" in msg and "complete" not in msg.lower():
+                            update_progress(0.3, "Transcribing audio...")
+                        elif "complete" in msg.lower():
+                            update_progress(0.7, "Transcription complete")
+                        elif "Initializing" in msg:
+                            update_progress(0.18, "Initializing transcription...")
+                    elif msg_type == "progress":
+                        # Handle numeric progress updates
+                        try:
+                            prog_value = float(msg)
+                            # Map 0-100 to 0.3-0.7 range (transcription phase)
+                            update_progress(0.3 + (prog_value / 100) * 0.4, f"Transcribing... {prog_value:.0f}%")
+                            has_new_messages = True
+                        except:
+                            pass
                 
                 # Check for result
                 if not result_queue.empty():
                     status, message, segments, metadata = result_queue.get()
                     if status == "error":
-                        log(f"❌ {message}")
+                        logger.error(f"Transcription error: {message}")
+                        yield f"❌ {message}", "", "", "", ""
                         process.join(timeout=5)
-                        return log(""), "", "", "", ""
+                        return
                     elif status == "success":
-                        log(f"✅ {message}")
+                        update_progress(0.75, "✅ Processing results...")
+                        has_new_messages = True
                         break
+                
+                # Yield to UI only when there are new messages
+                current_time = time.time()
+                if has_new_messages:
+                    yield current_status, "", "", "", ""
+                    last_yield_time = current_time
                 
                 # Check timeout
                 if time.time() - start_time > max_wait:
-                    log(f"❌ Transcription timeout")
+                    logger.error("Transcription timeout")
+                    yield "❌ Transcription timeout (>10 minutes)", "", "", "", ""
                     process.terminate()
                     process.join(timeout=5)
                     if process.is_alive():
                         process.kill()
-                    return log(""), "", "", "", ""
+                    return
                 
                 time.sleep(0.1)
             
@@ -600,20 +702,24 @@ class WhisperGUI:
                     logger.warning(f"Failed to cleanup temp audio: {e}")
             
             if segments is None or metadata is None:
-                log(f"❌ No transcription result received")
-                return log(""), "", "", "", ""
+                logger.error("No transcription result received")
+                yield "❌ No transcription result received", "", "", "", ""
+                return
             
             # Create output directory
+            update_progress(0.78, "📂 Creating output directory...")
             success, output_dir, org_msg = self.file_manager.organize_output(str(file_path))
             if not success:
-                log(f"{org_msg}")
-                return log(""), "", "", "", ""
+                logger.error(f"Failed to create output directory: {org_msg}")
+                yield f"❌ {org_msg}", "", "", "", ""
+                return
             
             self.current_output_dir = output_dir
-            log(f"Output directory: {Path(output_dir).name}/")
+            logger.info(f"Output directory: {Path(output_dir).name}")
             
             # Save outputs
-            log(f"Saving transcription...")
+            update_progress(0.80, "💾 Saving transcription files...")
+            
             results = self.output_formatter.save_all_formats(
                 segments,
                 metadata,
@@ -625,8 +731,6 @@ class WhisperGUI:
             txt_content = json_content = srt_content = vtt_content = ""
             
             for fmt, success in results.items():
-                status = "Saved" if success else "Failed"
-                log(f"  {status}: {fmt.upper()}")
                 if success:
                     file_path_fmt = Path(output_dir) / f"transcript.{fmt}"
                     if file_path_fmt.exists():
@@ -639,27 +743,40 @@ class WhisperGUI:
                             srt_content = content
                         elif fmt == 'vtt':
                             vtt_content = content
+                    logger.info(f"Saved: {fmt.upper()}")
+                else:
+                    logger.warning(f"Failed to save: {fmt.upper()}")
             
-            # Move original file to output
+            # Move original file to output (to data subfolder)
             if self.file_manager.options.move_input_to_output:
+                update_progress(0.85, "📦 Moving original file...")
                 success, new_path, move_msg = self.file_manager.move_input_to_output(
                     str(file_path),
                     output_dir
                 )
                 if success:
-                    log(f"{move_msg}")
+                    logger.info(move_msg)
             
             # Cleanup temp files
             self.file_manager.cleanup_temp_files()
             
-            log(f"Transcription complete!")
+            # Auto-create ZIP archive
+            update_progress(0.90, "🗜️ Creating ZIP archive...")
+            logger.info("Creating ZIP archive")
             
-            return log(""), txt_content, json_content, srt_content, vtt_content
+            zip_success, zip_msg = self.auto_create_zip(Path(output_dir).parent.name)
+            if zip_success:
+                logger.info(zip_msg)
+            else:
+                logger.warning(zip_msg)
+            
+            update_progress(1.0, "🎉 Transcription complete!")
+            logger.info("Transcription complete")
+            yield current_status, txt_content, json_content, srt_content, vtt_content
             
         except Exception as e:
-            log(f"❌ Error: {str(e)}")
             logger.exception("Transcription error")
-            return log(""), "", "", "", ""
+            yield f"❌ Error: {str(e)}", "", "", "", ""
     
     def create_interface(self) -> gr.Blocks:
         """
@@ -689,7 +806,6 @@ class WhisperGUI:
                         choices=[],
                         interactive=True
                     )
-                    refresh_input_btn = gr.Button("Refresh Input Files", size="sm")
                     file_info = gr.Textbox(label="Selected File Info", interactive=False)
                     
                     gr.Markdown("## Transcription Settings")
@@ -765,25 +881,33 @@ class WhisperGUI:
                     )
                     
                     transcribe_btn = gr.Button("🚀 Start Transcription", variant="primary", size="lg")
-                    gr.Markdown("## 📊 Processing Log")
-                    log_output = gr.Textbox(
-                        label="Status & Progress",
-                        lines=15,
-                        max_lines=15,
-                        interactive=False,
-                        autoscroll=True
-                    )
-                # Right column: Logs & Output
+                    
+                   
+                # Right column: Output & Preview
                 with gr.Column(scale=1):
-
+                    gr.Markdown("## 📊 Progress")
+                    progress_display = gr.Textbox(
+                        label="Current Status",
+                        lines=1,
+                        max_lines=1,
+                        interactive=False,
+                        show_label=False,
+                        placeholder="Ready to start transcription..."
+                    )
                     
                     gr.Markdown("## 📄 Output Preview")
-                    output_folder_selector = gr.Dropdown(
-                        label="Select Output Folder to Preview",
+                    output_folder_selector = gr.Radio(
+                        label="Select Output Folder",
                         choices=[],
                         interactive=True
                     )
-                    refresh_preview_btn = gr.Button("🔄 Refresh Output Folders", size="sm")
+                    
+                    with gr.Row():
+                        download_file = gr.File(visible=False, scale=2, show_label=False)
+                        move_back_btn = gr.Button("⬅️ Move Media Back to Input Folder", variant="secondary", size="sm", visible=False)
+
+                    
+                    move_status = gr.Textbox(label="Move Status", interactive=False, lines=1, visible=False)
                     
                     with gr.Tabs():
                         with gr.Tab("TXT"):
@@ -817,32 +941,12 @@ class WhisperGUI:
                                 max_lines=20,
                                 interactive=False
                             )
-                    
-                    gr.Markdown("## 📁 Output Management")
-                    
-                    output_folder_mgmt = gr.Dropdown(
-                        label="Select Output Folder to Manage",
-                        choices=[],
-                        interactive=True
-                    )
-                    
-                    with gr.Row():
-                        move_back_btn = gr.Button("⬅️ Move Media Back to Input", variant="secondary")
-                        download_btn = gr.Button("⬇️ Download Folder (ZIP)", variant="primary")
-                    
-                    output_mgmt_status = gr.Textbox(label="Status", interactive=False)
-                    download_file = gr.File(label="Download Archive")
             
             # Event handlers
             file_upload.change(
                 fn=self.upload_files,
                 inputs=[file_upload],
                 outputs=[upload_status, input_file_radio, file_info]
-            )
-            
-            refresh_input_btn.click(
-                fn=lambda: gr.Radio(choices=self.get_input_files_list()),
-                outputs=[input_file_radio]
             )
             
             input_file_radio.change(
@@ -865,46 +969,46 @@ class WhisperGUI:
                     batch_size_slider,
                     output_formats_check
                 ],
-                outputs=[log_output, txt_output, json_output, srt_output, vtt_output]
+                outputs=[progress_display, txt_output, json_output, srt_output, vtt_output]
             ).then(
-                fn=lambda: (gr.Dropdown(choices=self.get_output_folders()), gr.Dropdown(choices=self.get_output_folders())),
-                outputs=[output_folder_selector, output_folder_mgmt]
-            )
-            
-            refresh_preview_btn.click(
-                fn=lambda: gr.Dropdown(choices=self.get_output_folders()),
-                outputs=[output_folder_selector]
+                fn=lambda: (
+                    gr.Radio(choices=self.get_input_files_list()),
+                    gr.Radio(choices=self.get_output_folders(), value=self.get_output_folders()[0] if self.get_output_folders() else None),
+                    self.get_output_folders()[0] if self.get_output_folders() else None
+                ),
+                outputs=[input_file_radio, output_folder_selector, output_folder_selector]
+            ).then(
+                fn=self.download_output_folder,
+                inputs=[output_folder_selector],
+                outputs=[download_file, download_file, move_back_btn]
             )
             
             output_folder_selector.change(
                 fn=self.load_output_preview,
                 inputs=[output_folder_selector],
                 outputs=[txt_output, json_output, srt_output, vtt_output]
+            ).then(
+                fn=self.download_output_folder,
+                inputs=[output_folder_selector],
+                outputs=[download_file, download_file, move_back_btn]
             )
             
             move_back_btn.click(
                 fn=self.move_files_back,
-                inputs=[output_folder_mgmt],
-                outputs=[output_mgmt_status]
+                inputs=[output_folder_selector],
+                outputs=[move_status]
             ).then(
-                fn=lambda: gr.Radio(choices=self.get_input_files_list()),
-                outputs=[input_file_radio]
+                fn=lambda: (gr.Radio(choices=self.get_input_files_list()), gr.update(visible=True)),
+                outputs=[input_file_radio, move_status]
             )
             
-            download_btn.click(
-                fn=self.download_output_folder,
-                inputs=[output_folder_mgmt],
-                outputs=[output_mgmt_status, download_file]
-            )
-            
-            # Initialize radio and dropdowns on load
+            # Initialize radio on load
             interface.load(
                 fn=lambda: (
                     gr.Radio(choices=self.get_input_files_list()),
-                    gr.Dropdown(choices=self.get_output_folders()),
-                    gr.Dropdown(choices=self.get_output_folders())
+                    gr.Radio(choices=self.get_output_folders())
                 ),
-                outputs=[input_file_radio, output_folder_selector, output_folder_mgmt]
+                outputs=[input_file_radio, output_folder_selector]
             )
         
         return interface

@@ -72,7 +72,8 @@ class MediaConverter:
         self,
         video_path: str,
         output_path: Optional[str] = None,
-        audio_format: Optional[str] = None
+        audio_format: Optional[str] = None,
+        progress_callback: Optional[callable] = None
     ) -> Tuple[bool, str, str]:
         """
         Extract audio from video file.
@@ -81,6 +82,7 @@ class MediaConverter:
             video_path: Path to input video file
             output_path: Path for output audio file (optional)
             audio_format: Output audio format (optional, uses config default)
+            progress_callback: Optional callback for progress messages
             
         Returns:
             Tuple[bool, str, str]: (success, output_path, message)
@@ -100,6 +102,8 @@ class MediaConverter:
             # Ensure output directory exists
             output_path.parent.mkdir(parents=True, exist_ok=True)
             
+            if progress_callback:
+                progress_callback(f"Converting {video_path.name} to audio...")
             logger.info(f"Converting {video_path.name} to audio...")
             
             # Build ffmpeg command
@@ -111,8 +115,11 @@ class MediaConverter:
                 ar=self.options.sample_rate,
                 ac=self.options.channels,
                 audio_bitrate=self.options.audio_bitrate,
-                loglevel='error'
+                loglevel='warning'  # Changed from 'error' to see progress
             )
+            
+            if progress_callback:
+                progress_callback(f"Running FFmpeg conversion...")
             
             # Run conversion
             ffmpeg.run(stream, overwrite_output=True, capture_stdout=True, capture_stderr=True)
@@ -121,6 +128,8 @@ class MediaConverter:
                 size_mb = output_path.stat().st_size / (1024 * 1024)
                 message = f"✅ Audio extracted: {output_path.name} ({size_mb:.2f} MB)"
                 logger.info(message)
+                if progress_callback:
+                    progress_callback(message)
                 return True, str(output_path), message
             else:
                 message = "Conversion completed but output file not found"

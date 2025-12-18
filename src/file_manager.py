@@ -94,20 +94,23 @@ class FileManager:
     ) -> Tuple[bool, str, str]:
         """
         Create output directory structure for a file.
+        Creates: [name]/data/ subfolder for transcription files.
         
         Args:
             input_file_path: Path to input file
             create_subfolder: Override default subfolder creation setting
             
         Returns:
-            Tuple[bool, str, str]: (success, output_dir_path, message)
+            Tuple[bool, str, str]: (success, data_dir_path, message)
         """
         try:
             if create_subfolder is None:
                 create_subfolder = self.options.create_subfolder
             
             if create_subfolder:
-                output_dir = self.get_output_subfolder_path(input_file_path)
+                base_output_dir = self.get_output_subfolder_path(input_file_path)
+                # Create data subfolder
+                output_dir = base_output_dir / "data"
             else:
                 output_dir = Path(self.options.output_base_dir)
             
